@@ -27,6 +27,8 @@ import { SolutionsMetrics, ExecutionDay } from "metrics-utils";
 import { ConditionAspect } from "../../utils/aspects";
 import { OperationalInsightsDashboard } from "../dashboard/ops-insights-dashboard";
 import { Dashboard } from "aws-cdk-lib/aws-cloudwatch";
+import { Certificate } from "aws-cdk-lib/aws-certificatemanager";
+import { HostedZone } from "aws-cdk-lib/aws-route53";
 
 export interface BackEndProps extends SolutionConstructProps {
   readonly solutionVersion: string;
@@ -43,6 +45,10 @@ export interface BackEndProps extends SolutionConstructProps {
   readonly conditions: Conditions;
   readonly sharpSizeLimit: string;
   readonly createSourceBucketsResource: (key?: string) => string[];
+  readonly certificateArn: string;
+  readonly domainName: string;
+  readonly zoneId: string;
+  readonly zoneName: string;
 }
 
 export class BackEnd extends Construct {
@@ -186,6 +192,13 @@ export class BackEnd extends Construct {
       distributionId: props.existingCloudFrontDistributionId,
     });
 
+    const certificate = Certificate.fromCertificateArn(this, "Certificate", props.certificateArn);
+
+    const zone = HostedZone.fromHostedZoneAttributes(this, "Zone", {
+      hostedZoneId: props.zoneId,
+      zoneName: props.zoneName,
+    });
+
     const apiGatewayArchitecture = new ApiGatewayArchitecture(this, {
       imageHandlerLambdaFunction,
       originRequestPolicy,
@@ -199,6 +212,8 @@ export class BackEnd extends Construct {
       originRequestPolicy,
       cachePolicy,
       existingDistribution,
+      certificate,
+      zone,
       ...props,
     });
 
