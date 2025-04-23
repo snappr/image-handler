@@ -170,7 +170,7 @@ export class S3ObjectLambdaArchitecture {
         { httpStatus: 504, ttl: Duration.minutes(10) },
       ],
       certificate: props.certificate,
-      domainNames: [props.domainName],
+      domainNames: [`${props.domainName}.${props.zoneName}`],
     };
 
     this.imageHandlerCloudFrontDistribution = new Distribution(
