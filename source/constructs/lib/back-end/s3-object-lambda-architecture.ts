@@ -4,6 +4,7 @@
 import * as path from "path";
 import { CfnAccessPoint } from "aws-cdk-lib/aws-s3";
 import * as s3objectlambda from "aws-cdk-lib/aws-s3objectlambda";
+import { ICertificate } from "aws-cdk-lib/aws-certificatemanager";
 import {
   AllowedMethods,
   CachePolicy,
@@ -28,12 +29,17 @@ import { readFileSync } from "fs";
 import { BackEnd, BackEndProps } from "./back-end-construct";
 import { Effect, Policy, PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import { S3ObjectLambdaOrigin } from "./s3-object-lambda-origin";
+import { ARecord, IHostedZone, RecordTarget } from "aws-cdk-lib/aws-route53";
+import { CloudFrontTarget } from "aws-cdk-lib/aws-route53-targets";
 
 export interface S3ObjectLambdaArchitectureProps extends BackEndProps {
   originRequestPolicy: OriginRequestPolicy;
   cachePolicy: CachePolicy;
   imageHandlerLambdaFunction: NodejsFunction;
   existingDistribution: IDistribution;
+  certificate: ICertificate;
+  domainName: string;
+  zone: IHostedZone;
 }
 
 export class S3ObjectLambdaArchitecture {
@@ -163,6 +169,8 @@ export class S3ObjectLambdaArchitecture {
         { httpStatus: 503, ttl: Duration.minutes(10) },
         { httpStatus: 504, ttl: Duration.minutes(10) },
       ],
+      certificate: props.certificate,
+      domainNames: [`${props.domainName}.${props.zoneName}`],
     };
 
     this.imageHandlerCloudFrontDistribution = new Distribution(
@@ -180,6 +188,12 @@ export class S3ObjectLambdaArchitecture {
         })
       )
     );
+
+    new ARecord(scope, "DistributionARecord", {
+      zone: props.zone,
+      recordName: props.domainName,
+      target: RecordTarget.fromAlias(new CloudFrontTarget(this.imageHandlerCloudFrontDistribution)),
+    });
 
     const conditionalCloudFrontDistributionId = Fn.conditionIf(
       props.conditions.useExistingCloudFrontDistributionCondition.logicalId,

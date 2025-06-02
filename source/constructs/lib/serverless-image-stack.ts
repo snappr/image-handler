@@ -188,6 +188,26 @@ export class ServerlessImageHandlerStack extends Stack {
       allowedPattern: "^$|^E[A-Z0-9]{8,}$",
     });
 
+    const certificateArnParameter = new CfnParameter(this, "CertificateArnParameter", {
+      type: "String",
+      description: "The ARN of the certificate to use for the CloudFront distribution.",
+    });
+
+    const domainNameParameter = new CfnParameter(this, "DomainNameParameter", {
+      type: "String",
+      description: "The domain name to use for the CloudFront distribution.",
+    });
+
+    const zoneNameParameter = new CfnParameter(this, "ZoneNameParameter", {
+      type: "String",
+      description: "The Route 53 zone name to use for the CloudFront distribution domain name.",
+    });
+
+    const zoneIdParameter = new CfnParameter(this, "ZoneIdParameter", {
+      type: "String",
+      description: "The Route 53 zone ID to use for the CloudFront distribution domain name.",
+    });
+
     /* eslint-disable no-new */
     new CfnRule(this, "ExistingDistributionIdRequiredRule", {
       ruleCondition: Fn.conditionEquals(useExistingCloudFrontDistribution.valueAsString, "Yes"),
@@ -275,6 +295,10 @@ export class ServerlessImageHandlerStack extends Stack {
       conditions: commonResources.conditions,
       sharpSizeLimit,
       createSourceBucketsResource: commonResources.customResources.createSourceBucketsResource,
+      certificateArn: certificateArnParameter.valueAsString,
+      domainName: domainNameParameter.valueAsString,
+      zoneId: zoneIdParameter.valueAsString,
+      zoneName: zoneNameParameter.valueAsString,
       ...solutionConstructProps,
     });
 
@@ -429,7 +453,7 @@ export class ServerlessImageHandlerStack extends Stack {
 
     /* eslint-disable no-new */
     new CfnOutput(this, "ApiEndpoint", {
-      value: apiEndpointConditionString,
+      value: `https://${domainNameParameter.valueAsString}.${zoneNameParameter.valueAsString}`,
       description: "Link to API endpoint for sending image requests to.",
     });
     new CfnOutput(this, "DemoUrl", {
@@ -462,6 +486,14 @@ export class ServerlessImageHandlerStack extends Stack {
       value: `https://console.aws.amazon.com/cloudwatch/home?#dashboards/dashboard/${backEnd.operationalDashboard.dashboardName}`,
       description: "CloudFront metrics dashboard for the distribution.",
       condition: deployCloudWatchDashboard,
+    });
+    new CfnOutput(this, "ImageHandlerSecretName", {
+      value: secretsManagerSecretParameter.valueAsString,
+      description: "The name of the secret containing the image handler secret key.",
+    });
+    new CfnOutput(this, "ImageHandlerSecretKey", {
+      value: secretsManagerKeyParameter.valueAsString,
+      description: "The name of the secret key containing the image handler secret.",
     });
 
     Aspects.of(this).add(new SuppressLambdaFunctionCfnRulesAspect());
