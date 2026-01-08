@@ -25,6 +25,48 @@ export class ImageHandler {
   constructor(private readonly s3Client: S3, private readonly rekognitionClient: Rekognition) {}
 
   /**
+   * Converts 10-bit AVIF images to PNG using jsquash fallback.
+   * This is only called when Sharp fails to process a 10-bit AVIF image.
+   * @param imageBuffer The original image buffer.
+   * @returns The converted PNG buffer.
+   * @throws Error if conversion fails.
+   */
+  private async convert10bitAvifToPng(imageBuffer: Buffer): Promise<Buffer> {
+    try {
+      console.log("[10-bit AVIF Fallback] Converting AVIF to PNG using jsquash...", {
+        originalSize: imageBuffer.length,
+      });
+
+      // Dynamically import jsquash modules (ES modules)
+      const { decode: decodeAvif } = await import("@jsquash/avif");
+      const { encode: encodePng } = await import("@jsquash/png");
+
+      // Convert Buffer to ArrayBuffer for jsquash
+      const arrayBuffer = imageBuffer.buffer.slice(
+        imageBuffer.byteOffset,
+        imageBuffer.byteOffset + imageBuffer.byteLength
+      ) as ArrayBuffer;
+
+      // Decode AVIF to raw pixel data using jsquash
+      const imageData = await decodeAvif(arrayBuffer);
+
+      // Encode to PNG using jsquash
+      const pngArrayBuffer = await encodePng(imageData);
+
+      console.log("[10-bit AVIF Fallback] Successfully converted AVIF to PNG", {
+        originalSize: imageBuffer.length,
+        pngSize: pngArrayBuffer.byteLength,
+        dimensions: `${imageData.width}x${imageData.height}`,
+      });
+
+      return Buffer.from(pngArrayBuffer);
+    } catch (conversionError) {
+      console.error("[10-bit AVIF Fallback] Failed to convert AVIF using jsquash:", conversionError.message);
+      throw new Error(`Failed to convert 10-bit AVIF: ${conversionError.message}`);
+    }
+  }
+
+  /**
    * Creates a Sharp object from Buffer
    * @param originalImage An image buffer.
    * @param edits The edits to be applied to an image
@@ -89,6 +131,7 @@ export class ImageHandler {
    */
   async process(imageRequestInfo: ImageRequestInfo): Promise<Buffer> {
     const { originalImage, edits } = imageRequestInfo;
+
     const { SHARP_SIZE_LIMIT } = process.env;
     const limitInputPixels: number | boolean =
       SHARP_SIZE_LIMIT === "" || isNaN(Number(SHARP_SIZE_LIMIT)) || Number(SHARP_SIZE_LIMIT);
@@ -97,52 +140,44 @@ export class ImageHandler {
       animated: imageRequestInfo.contentType === ContentTypes.GIF,
       limitInputPixels,
     };
+
     try {
-      // Return early if no edits are required
-      if (!edits || !Object.keys(edits).length) {
-        if (imageRequestInfo.outputFormat !== undefined) {
-          // convert image to Sharp and change output format if specified
-          const modifiedImage = this.modifyImageOutput(
-            await this.instantiateSharpImage(originalImage, edits, options),
-            imageRequestInfo
-          );
-          return await modifiedImage.toBuffer();
-        }
-        // no edits or output format changes, convert to base64 encoded image
-        return originalImage;
-      }
-
-      // Apply edits if specified
-      options.animated =
-        typeof edits.animated !== "undefined" ? edits.animated : imageRequestInfo.contentType === ContentTypes.GIF;
-      let image = await this.instantiateSharpImage(originalImage, edits, options);
-
-      // default to non animated if image does not have multiple pages
-      if (options.animated) {
-        const metadata = await image.metadata();
-        if (!metadata.pages || metadata.pages <= 1) {
-          options.animated = false;
-          image = await this.instantiateSharpImage(originalImage, edits, options);
-        }
-      }
-      // apply image edits
-      let modifiedImage = await this.applyEdits(image, edits, options.animated);
-      // modify image output if requested
-      modifiedImage = this.modifyImageOutput(modifiedImage, imageRequestInfo);
-      return await modifiedImage.toBuffer();
+      // Try processing with Sharp first (zero overhead for normal images)
+      return await this.processWithSharp(originalImage, imageRequestInfo, edits, options);
     } catch (error) {
+      // Check if this is a 10-bit AVIF error
+      const is10bitAvifError =
+        error.message?.includes("Bitstream not supported by this decoder") ||
+        error.message?.includes("bit-depth other than 8");
+
+      if (is10bitAvifError) {
+        console.log("[10-bit AVIF Fallback] Detected 10-bit AVIF error, attempting conversion...");
+
+        try {
+          // Convert 10-bit AVIF to PNG using jsquash fallback
+          const convertedImage = await this.convert10bitAvifToPng(originalImage);
+
+          // Retry processing with converted image
+          console.log("[10-bit AVIF Fallback] Retrying image processing with converted PNG...");
+          return await this.processWithSharp(convertedImage, imageRequestInfo, edits, options);
+        } catch (fallbackError) {
+          console.error("[10-bit AVIF Fallback] Fallback failed:", fallbackError.message);
+          // If fallback fails, throw original 10-bit AVIF error
+          throw new ImageHandlerError(
+            StatusCodes.BAD_REQUEST,
+            "UnsupportedImageFormat",
+            "Unable to process 10-bit AVIF image. Please use 8-bit AVIF or other supported formats."
+          );
+        }
+      }
+
+      // Not a 10-bit AVIF error, handle normally
       const errorMapping: ErrorMapping[] = [
         {
           pattern: "Image to composite must have same dimensions or smaller",
           statusCode: StatusCodes.BAD_REQUEST,
           errorType: "BadRequest",
           message: (err: Error) => err.message.replace("composite", "overlay"),
-        },
-        {
-          pattern: "Bitstream not supported by this decoder",
-          statusCode: StatusCodes.BAD_REQUEST,
-          errorType: "BadRequest",
-          message: "Invalid base image. AVIF images with a bit-depth other than 8 are not supported for image edits.",
         },
       ];
       this.handleError(
@@ -151,6 +186,55 @@ export class ImageHandler {
         errorMapping
       );
     }
+  }
+
+  /**
+   * Internal method to process image with Sharp.
+   * Extracted to allow retry logic for 10-bit AVIF fallback.
+   * @param imageBuffer The image buffer to process.
+   * @param imageRequestInfo The image request info.
+   * @param edits The edits to apply.
+   * @param options Sharp options.
+   * @returns Processed image buffer.
+   */
+  private async processWithSharp(
+    imageBuffer: Buffer,
+    imageRequestInfo: ImageRequestInfo,
+    edits: ImageEdits | undefined,
+    options: { failOnError: boolean; animated: boolean; limitInputPixels: number | boolean }
+  ): Promise<Buffer> {
+    // Return early if no edits are required
+    if (!edits || !Object.keys(edits).length) {
+      if (imageRequestInfo.outputFormat !== undefined) {
+        // convert image to Sharp and change output format if specified
+        const modifiedImage = this.modifyImageOutput(
+          await this.instantiateSharpImage(imageBuffer, edits, options),
+          imageRequestInfo
+        );
+        return await modifiedImage.toBuffer();
+      }
+      // no edits or output format changes, return original
+      return imageBuffer;
+    }
+
+    // Apply edits if specified
+    options.animated =
+      typeof edits.animated !== "undefined" ? edits.animated : imageRequestInfo.contentType === ContentTypes.GIF;
+    let image = await this.instantiateSharpImage(imageBuffer, edits, options);
+
+    // default to non animated if image does not have multiple pages
+    if (options.animated) {
+      const metadata = await image.metadata();
+      if (!metadata.pages || metadata.pages <= 1) {
+        options.animated = false;
+        image = await this.instantiateSharpImage(imageBuffer, edits, options);
+      }
+    }
+    // apply image edits
+    let modifiedImage = await this.applyEdits(image, edits, options.animated);
+    // modify image output if requested
+    modifiedImage = this.modifyImageOutput(modifiedImage, imageRequestInfo);
+    return await modifiedImage.toBuffer();
   }
 
   /**
