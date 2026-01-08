@@ -129,7 +129,8 @@ export class BackEnd extends Construct {
       },
       bundling: {
         externalModules: ["sharp"],
-        nodeModules: ["sharp"],
+        // Don't include nodeModules - let afterBundling handle Sharp installation
+        // This prevents CDK from running npm ci/install with package-lock.json mismatches
         commandHooks: {
           beforeBundling(inputDir: string, outputDir: string): string[] {
             return [];
@@ -138,7 +139,8 @@ export class BackEnd extends Construct {
             return [];
           },
           afterBundling(inputDir: string, outputDir: string): string[] {
-            return [`cd ${outputDir}`, "rm -rf node_modules/sharp && npm install --arch=x64 --platform=linux sharp"];
+            // Manually install Sharp with correct architecture for Lambda
+            return [`cd ${outputDir}`, "npm install --arch=x64 --platform=linux sharp@0.34.5"];
           },
         },
       },
